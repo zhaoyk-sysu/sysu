@@ -1,0 +1,232 @@
+import re
+
+def parse_literal(lit_str):
+    """
+    将字符串形式的文字解析为 (predicate, (args,), is_neg) 三元组
+    例如: "~P(x,y)" -> ("P", ("x", "y"), True)
+          "Q(a)"   -> ("Q", ("a",), False)
+    """
+    lit_str = lit_str.strip()
+    is_neg = lit_str.startswith("~")
+    if is_neg:
+        lit_str = lit_str[1:].strip()
+    m = re.match(r"^([A-Z]\w*)\((.*)\)$", lit_str)
+    if not m:
+        return (lit_str, (), is_neg)
+    pred = m.group(1)
+    args_str = m.group(2).strip()
+    args = tuple(x.strip() for x in args_str.split(',')) if args_str else ()
+    return (pred, args, is_neg)
+
+def literal_to_str(lit):
+    """
+    将文字三元组还原为字符串表示。
+    """
+    pred, args, is_neg = lit
+    s = "~" if is_neg else ""
+    if args:
+        s += f"{pred}(" + ",".join(args) + ")"
+    else:
+        s += pred
+    return s
+
+def clause_to_str(clause):
+    """
+    将子句（一组文字）转换为字符串形式，空子句返回 "NIL"
+    """
+    if not clause:
+        return "NIL"
+    return "(" + ", ".join(literal_to_str(l) for l in clause) + ")"
+
+class Sentences:
+    def __init__(self, path):
+        self.kb = []      # 知识库：每个子句为 list of literal（三元组形式）
+        self.query = []   # 查询子句（解析后的形式）
+        self.steps = []   # 保存归结步骤记录（字符串列表）
+        self.load_file(path)
+
+    def load_file(self, path):
+        """
+        读取文件，遇 "KB:" 加载知识库，遇 "QUERY:" 后加载查询。
+        查询部分已是否定形式，直接解析后加入 KB。
+        """
+        with open(path, encoding='utf-8') as f:
+            lines = f.readlines()
+        reading_kb = True
+        for line in lines:
+            line = line.strip()
+            if not line or line in {"KB:", "QUERY:"}:
+                if line == "QUERY:":
+                    reading_kb = False
+                continue
+            if reading_kb:
+                clause = self.parse_clause(line)
+                self.kb.append(clause)
+            else:
+                clause = self.parse_clause(line)
+                self.query.append(clause)
+        # 将查询也加入知识库
+        self.kb.extend(self.query)
+
+    def parse_clause(self, line):
+        """
+        将子句字符串（可能含括号）解析为文字三元组列表
+        """
+        line = line.strip()
+        if line.startswith("(") and line.endswith(")"):
+            line = line[1:-1].strip()
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        return [parse_literal(p) for p in parts]
+
+    def resolution(self):
+        """
+        实现一阶逻辑归结算法：逐步归结，
+        如果推出空子句则输出归结步骤和成功信息，否则输出归结失败信息。
+        """
+        print("开始归结过程:")
+        print("KB:")
+        for i, clause in enumerate(self.kb, start=1):
+            print(f"{i}: {clause_to_str(clause)}")
+        print("QUERY (negated form):")
+        for clause in self.query:
+            print(clause_to_str(clause))
+        print()
+
+        kb_list = list(self.kb)
+        seen = set(frozenset(clause) for clause in kb_list)
+        step_count = 0
+        expanded = True
+        while expanded:
+            expanded = False
+            n = len(kb_list)
+            for i in range(n):
+                for j in range(i+1, n):
+                    resolvents = self.resolve(kb_list[i], kb_list[j])
+                    for new_clause, unify_info in resolvents:
+                        step_count += 1
+                        step_str = f"[Step {step_count}] 归结: {clause_to_str(kb_list[i])} 与 {clause_to_str(kb_list[j])} => {clause_to_str(new_clause)}，使用MGU: {unify_info}"
+                        print(step_str)
+                        self.steps.append(step_str)
+                        if not new_clause:
+                            print("推出空子句 (NIL)，归结成功！")
+                            return
+                        fs = frozenset(new_clause)
+                        if fs not in seen:
+                            seen.add(fs)
+                            kb_list.append(new_clause)
+                            expanded = True
+            if not expanded:
+                print("无法推出空子句，归结失败！")
+                return
+
+    def resolve(self, c1, c2):
+        """
+        对两个子句 c1 和 c2 进行归结，
+        返回列表，每个元素为 (新子句, unify_info)。
+        """
+        resolvents = []
+        for i, l1 in enumerate(c1):
+            for j, l2 in enumerate(c2):
+                if l1[0] == l2[0] and l1[2] != l2[2]:
+                    subs = self.literal_unify(l1, l2)
+                    if subs is not None:
+                        new_clause = []
+                        for k, lit in enumerate(c1):
+                            if k != i:
+                                new_clause.append(self.apply_subs(lit, subs))
+                        for k, lit in enumerate(c2):
+                            if k != j:
+                                new_clause.append(self.apply_subs(lit, subs))
+                        # 去重
+                        new_clause_dedup = []
+                        for lit in new_clause:
+                            if lit not in new_clause_dedup:
+                                new_clause_dedup.append(lit)
+                        resolvents.append((new_clause_dedup, subs))
+        return resolvents
+
+    def literal_unify(self, l1, l2):
+        """
+        尝试统一两个文字 l1 和 l2，
+        若谓词相同且极性相反，则对参数进行合一，返回替换字典或 None。
+        """
+        pred1, args1, neg1 = l1
+        pred2, args2, neg2 = l2
+        if pred1 != pred2 or neg1 == neg2:
+            return None
+        if len(args1) != len(args2):
+            return None
+        theta = {}
+        for a, b in zip(args1, args2):
+            theta = self.unify(a, b, theta)
+            if theta is None:
+                return None
+        return theta
+
+    def unify(self, x, y, theta):
+        """
+        最一般合一算法：
+        对 x 和 y 在 theta 替换下进行统一，返回更新后的 theta 或 None。
+        """
+        if theta is None:
+            return None
+        if x == y:
+            return theta
+        if self.is_variable(x):
+            return self.unify_var(x, y, theta)
+        if self.is_variable(y):
+            return self.unify_var(y, x, theta)
+        return None
+
+    def is_variable(self, token):
+        """
+        判断 token 是否为单个小写字母
+        """
+        return len(token) == 1 and token.islower()
+
+    def unify_var(self, var, x, theta):
+        if var in theta:
+            return self.unify(theta[var], x, theta)
+        if self.occurs_check(var, x, theta):
+            return None
+        theta[var] = x
+        return theta
+
+    def occurs_check(self, var, x, theta):
+        if var == x:
+            return True
+        if self.is_variable(x) and x in theta:
+            return self.occurs_check(var, theta[x], theta)
+        return False
+
+    def apply_subs(self, lit, theta):
+        """
+        对文字 lit 应用替换字典 theta，返回新的文字（三元组）。
+        """
+        pred, args, neg = lit
+        new_args = []
+        for a in args:
+            if a in theta:
+                new_args.append(theta[a])
+            else:
+                new_args.append(a)
+        return (pred, tuple(new_args), neg)
+
+    def reindex(self):
+        """
+        逆推归结过程：从最后一步开始逆序打印所有记录的归结步骤
+        """
+        print("\n归结逆推过程:")
+        for step in reversed(self.steps):
+            print(step)
+
+if __name__ == "__main__":
+    # 假设文件 test1.txt 内容为：
+    # KB:
+    # (P(x),Q(g(x)))
+    # (R(a),Q(z),~P(aa))
+    # QUERY:
+    # ~R(a)
+    s = Sentences("test1.txt")
+    s.resolution()
+    s.reindex()

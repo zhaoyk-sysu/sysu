@@ -1,0 +1,170 @@
+import re
+
+
+def parse_literal(expression):
+    """
+    解析字符串文字，返回 (predicate, (args,), is_negative)
+    例如: "~P(x,y)" -> ("P", ("x", "y"), True)
+          "Q(a)"   -> ("Q", ("a",), False)
+    """
+    expression = expression.strip()
+    negated = expression.startswith("~")
+    if negated:
+        expression = expression[1:].strip()
+    match = re.match(r"^([A-Z]\w*)\((.*)\)$", expression)
+    if not match:
+        return (expression, (), negated)
+    predicate, arguments = match.groups()
+    args_tuple = tuple(arg.strip() for arg in arguments.split(",")) if arguments else ()
+    return (predicate, args_tuple, negated)
+
+
+def literal_to_string(literal):
+    """ 将文字元组转换回字符串 """
+    predicate, arguments, negation = literal
+    result = "~" if negation else ""
+    result += f"{predicate}({','.join(arguments)})" if arguments else predicate
+    return result
+
+
+def clause_to_string(clause):
+    """ 将子句列表转换为字符串 """
+    return "NIL" if not clause else f"({', '.join(literal_to_string(l) for l in clause)})"
+
+
+class KnowledgeBase:
+    def __init__(self, file_path):
+        self.clauses = []   # 存储知识库子句
+        self.negated_queries = []  # 存储查询子句
+        self.derivation_steps = []  # 归结步骤
+        self.load_from_file(file_path)
+
+    def load_from_file(self, file_path):
+        """ 读取文件内容，解析 KB 和查询 """
+        with open(file_path, encoding='utf-8') as file:
+            lines = file.readlines()
+        reading_kb = True
+        for line in lines:
+            line = line.strip()
+            if not line or line in {"KB:", "QUERY:"}:
+                reading_kb = False if line == "QUERY:" else reading_kb
+                continue
+            parsed_clause = self.parse_clause(line)
+            if reading_kb:
+                self.clauses.append(parsed_clause)
+            else:
+                self.negated_queries.append(parsed_clause)
+        self.clauses.extend(self.negated_queries)
+
+    def parse_clause(self, text):
+        """ 将子句字符串解析为文字元组列表 """
+        text = text.strip("() ")
+        return [parse_literal(literal) for literal in text.split(",") if literal.strip()]
+
+    def resolve(self):
+        """ 进行一阶逻辑归结 """
+        print("开始归结过程:")
+        print("知识库:")
+        for idx, clause in enumerate(self.clauses, start=1):
+            print(f"{idx}: {clause_to_string(clause)}")
+        print("查询 (已取反):")
+        for clause in self.negated_queries:
+            print(clause_to_string(clause))
+        print()
+
+        kb_set = list(self.clauses)
+        encountered = set(frozenset(c) for c in kb_set)
+        step_counter = 0
+        new_resolutions = True
+        while new_resolutions:
+            new_resolutions = False
+            count = len(kb_set)
+            for i in range(count):
+                for j in range(i + 1, count):
+                    resolved_clauses = self.perform_resolution(kb_set[i], kb_set[j])
+                    for new_clause, substitution in resolved_clauses:
+                        step_counter += 1
+                        step_log = f"[Step {step_counter}] {clause_to_string(kb_set[i])} 和 {clause_to_string(kb_set[j])} 归结得 {clause_to_string(new_clause)}，使用替换: {substitution}"
+                        print(step_log)
+                        self.derivation_steps.append(step_log)
+                        if not new_clause:
+                            print("成功推出空子句 (NIL)，归结成功！")
+                            return
+                        clause_fset = frozenset(new_clause)
+                        if clause_fset not in encountered:
+                            encountered.add(clause_fset)
+                            kb_set.append(new_clause)
+                            new_resolutions = True
+            if not new_resolutions:
+                print("无法推出空子句，归结失败！")
+                return
+
+    def perform_resolution(self, clause1, clause2):
+        """ 归结两个子句，返回新子句列表 """
+        result_clauses = []
+        for i, lit1 in enumerate(clause1):
+            for j, lit2 in enumerate(clause2):
+                if lit1[0] == lit2[0] and lit1[2] != lit2[2]:
+                    substitution = self.unify_literals(lit1, lit2)
+                    if substitution is not None:
+                        new_clause = [self.apply_substitution(l, substitution) for k, l in enumerate(clause1) if k != i] + \
+                                     [self.apply_substitution(l, substitution) for k, l in enumerate(clause2) if k != j]
+                        new_clause = list(dict.fromkeys(new_clause))  # 去重
+                        result_clauses.append((new_clause, substitution))
+        return result_clauses
+
+    def unify_literals(self, literal1, literal2):
+        """ 尝试对两个文字进行合一，返回替换字典 """
+        pred1, args1, neg1 = literal1
+        pred2, args2, neg2 = literal2
+        if pred1 != pred2 or neg1 == neg2 or len(args1) != len(args2):
+            return None
+        substitution = {}
+        for arg1, arg2 in zip(args1, args2):
+            substitution = self.unify_terms(arg1, arg2, substitution)
+            if substitution is None:
+                return None
+        return substitution
+
+    def unify_terms(self, term1, term2, subs):
+        """ 进行最一般合一 (MGU) 计算 """
+        if subs is None:
+            return None
+        if term1 == term2:
+            return subs
+        if self.is_variable(term1):
+            return self.bind_variable(term1, term2, subs)
+        if self.is_variable(term2):
+            return self.bind_variable(term2, term1, subs)
+        return None
+
+    def is_variable(self, term):
+        return len(term) == 1 and term.islower()
+
+    def bind_variable(self, var, term, subs):
+        if var in subs:
+            return self.unify_terms(subs[var], term, subs)
+        if self.variable_occurs_check(var, term, subs):
+            return None
+        subs[var] = term
+        return subs
+
+    def variable_occurs_check(self, var, term, subs):
+        return var == term or (self.is_variable(term) and term in subs and self.variable_occurs_check(var, subs[term], subs))
+
+    def apply_substitution(self, literal, subs):
+        predicate, args, neg = literal
+        new_args = tuple(subs.get(arg, arg) for arg in args)
+        return (predicate, new_args, neg)
+
+    def trace_resolution(self):
+        """ 逆序打印归结步骤 """
+        print("\n归结推导过程:")
+        for step in reversed(self.derivation_steps):
+            print(step)
+
+
+if __name__ == "__main__":
+    solver = KnowledgeBase("test1.txt")
+    solver.resolve()
+    solver.trace_resolution()

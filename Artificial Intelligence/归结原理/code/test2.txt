@@ -1,0 +1,6 @@
+KB:
+GradStudent(sue)
+(~GradStudent(x), Student(x))
+(~Student(x), HardWorker(x))
+QUERY:
+~HardWorker(sue)

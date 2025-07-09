@@ -1,0 +1,7 @@
+KB:
+On(aa,bb)
+On(bb,cc)
+Green(aa)
+~Green(cc)
+QUERY:
+(~On(x,y), ~Green(x), Green(y))
